@@ -5,13 +5,16 @@ Training Script — Autonomous Endoscope Assistant (Active Vision)
 Train a Soft Actor-Critic (SAC) agent to control an active-vision endoscope
 camera crop window so that it tracks a moving surgical instrument tip.
 
-Quick start (no real data needed)
-----------------------------------
+Quick start (no real data — uses synthetic trajectory)
+------------------------------------------------------
     python scripts/train.py
 
-With MICCAI EndoVis data
-------------------------
-    python scripts/train.py --data_path data/raw/seq_01 --total_timesteps 1000000
+With real MICCAI EndoVis data
+-----------------------------
+    python scripts/train.py --case_dir "C:/Users/dprad/Downloads/train/train/case_1/1"
+
+    # Train on multiple cases by listing them
+    python scripts/train.py --case_dir ".../case_1/1" ".../case_1/2"
 
 The script will:
   1. Load (or synthesise) a per-frame instrument-tip trajectory.
@@ -45,40 +48,23 @@ from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 
 
 # --------------------------------------------------------------------------- #
-# Synthetic trajectory                                                          #
+# Synthetic trajectory fallback                                                #
 # --------------------------------------------------------------------------- #
 
 def make_synthetic_trajectory(
     n_frames: int = 1000,
-    frame_w: int = 1920,
-    frame_h: int = 1080,
+    frame_w: int = 1280,
+    frame_h: int = 512,
 ) -> np.ndarray:
-    """Generate a sinusoidal synthetic trajectory for smoke-testing.
-
-    The tool tip follows a Lissajous-like figure-8 path centred in the frame.
-
-    Parameters
-    ----------
-    n_frames : int
-        Number of frames (trajectory length).
-    frame_w, frame_h : int
-        Full video frame dimensions in pixels.
-
-    Returns
-    -------
-    np.ndarray, shape (n_frames, 2)
-        Pixel coordinates ``(x, y)`` for each frame.
-    """
+    """Lissajous figure-8 path for smoke-testing without real data."""
     t = np.linspace(0, 4 * math.pi, n_frames)
-    amplitude_x = frame_w * 0.35
-    amplitude_y = frame_h * 0.30
-    cx = frame_w / 2.0 + amplitude_x * np.cos(t)
-    cy = frame_h / 2.0 + amplitude_y * np.sin(2.0 * t)
+    cx = frame_w / 2.0 + frame_w * 0.30 * np.cos(t)
+    cy = frame_h / 2.0 + frame_h * 0.25 * np.sin(2.0 * t)
     return np.stack([cx, cy], axis=1)
 
 
 # --------------------------------------------------------------------------- #
-# Argument parser                                                               #
+# Argument parser                                                              #
 # --------------------------------------------------------------------------- #
 
 def parse_args() -> argparse.Namespace:
@@ -87,14 +73,23 @@ def parse_args() -> argparse.Namespace:
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument(
-        "--data_path",
+        "--case_dir",
         type=str,
+        nargs="+",
         default=None,
+        metavar="DIR",
         help=(
-            "Path to a MICCAI EndoVis sequence directory containing annotation "
-            "files (CSV / JSON / XML).  If omitted, a synthetic sinusoidal "
-            "trajectory is used so the script works out-of-the-box."
+            "One or more MICCAI sequence directories each containing "
+            "video.mp4 (e.g. .../train/case_1/1).  Trajectories from all "
+            "directories are concatenated.  Omit to use a synthetic trajectory."
         ),
+    )
+    parser.add_argument(
+        "--stereo_half",
+        type=str,
+        default="top",
+        choices=["top", "bottom"],
+        help="Which stereo camera half to use ('top' = left camera).",
     )
     parser.add_argument(
         "--total_timesteps",
@@ -124,39 +119,35 @@ def parse_args() -> argparse.Namespace:
         "--learning_rate",
         type=float,
         default=3e-4,
-        help="SAC learning rate for all optimisers.",
     )
     parser.add_argument(
         "--buffer_size",
         type=int,
         default=100_000,
-        help="Size of the SAC replay buffer.",
     )
     parser.add_argument(
         "--batch_size",
         type=int,
         default=256,
-        help="Mini-batch size for SAC gradient updates.",
     )
     parser.add_argument(
         "--seed",
         type=int,
         default=42,
-        help="Global random seed.",
     )
     return parser.parse_args()
 
 
 # --------------------------------------------------------------------------- #
-# Environment factory                                                           #
+# Environment factory                                                          #
 # --------------------------------------------------------------------------- #
 
-def make_env(trajectory: np.ndarray, seed: int = 0):
+def make_env(trajectory: np.ndarray, frame_size: tuple, seed: int = 0):
     """Return a thunk that creates and seeds an ``EndoscopeEnv``."""
     def _init():
         env = EndoscopeEnv(
             trajectory=trajectory,
-            frame_size=(1920, 1080),
+            frame_size=frame_size,
             crop_size=(400, 400),
             max_velocity=50.0,
             boundary_penalty=-10.0,
@@ -168,7 +159,7 @@ def make_env(trajectory: np.ndarray, seed: int = 0):
 
 
 # --------------------------------------------------------------------------- #
-# Main                                                                          #
+# Main                                                                         #
 # --------------------------------------------------------------------------- #
 
 def main() -> None:
@@ -177,25 +168,45 @@ def main() -> None:
     save_dir = Path(args.save_dir)
     save_dir.mkdir(parents=True, exist_ok=True)
 
+    loader = MICCAILoader(stereo_half=args.stereo_half, smooth_sigma=3.0)
+
     # ── 1. Load or synthesise trajectory ──────────────────────────────── #
-    if args.data_path is not None:
-        data_path = Path(args.data_path)
-        if not data_path.is_dir():
-            print(f"[ERROR] --data_path '{data_path}' is not a directory.")
-            sys.exit(1)
-        print(f"[INFO] Loading MICCAI trajectory from: {data_path}")
-        loader = MICCAILoader()
-        trajectory = loader.load_trajectory(data_path)
-        print(f"[INFO] Loaded trajectory with {len(trajectory)} frames.")
+    if args.case_dir is not None:
+        trajectories = []
+        frame_size = (MICCAILoader.STEREO_W, MICCAILoader.STEREO_HALF_H)
+
+        for case_path in args.case_dir:
+            p = Path(case_path)
+            if not p.is_dir():
+                print(f"[ERROR] case_dir '{p}' is not a directory.")
+                sys.exit(1)
+
+            # Read frame size from info.yaml (falls back to 1280×512)
+            frame_size = loader.get_frame_size(p)
+            print(f"[INFO] Loading trajectory from: {p}  (frame size {frame_size})")
+
+            traj = loader.load_trajectory(p)
+            trajectories.append(traj)
+            print(f"[INFO]   → {len(traj)} frames loaded.")
+
+        trajectory = np.concatenate(trajectories, axis=0)
+        print(f"[INFO] Total trajectory length: {len(trajectory)} frames.")
     else:
+        frame_size = (MICCAILoader.STEREO_W, MICCAILoader.STEREO_HALF_H)
         print(
-            "[INFO] No --data_path provided.  Using a synthetic sinusoidal "
-            "trajectory (1000 frames).  Pass --data_path to use real data."
+            "[INFO] No --case_dir provided.  Using synthetic trajectory "
+            f"({frame_size[0]}×{frame_size[1]}, 1000 frames).  "
+            "Pass --case_dir to use real MICCAI data."
         )
-        trajectory = make_synthetic_trajectory(n_frames=1_000)
+        trajectory = make_synthetic_trajectory(
+            n_frames=1_000, frame_w=frame_size[0], frame_h=frame_size[1]
+        )
+
+    print(f"[INFO] Frame size for environment: {frame_size}")
+    print(f"[INFO] Trajectory shape: {trajectory.shape}")
 
     # ── 2. Wrap in DummyVecEnv + VecNormalize ─────────────────────────── #
-    train_env = DummyVecEnv([make_env(trajectory, seed=args.seed)])
+    train_env = DummyVecEnv([make_env(trajectory, frame_size, seed=args.seed)])
     train_env = VecNormalize(
         train_env,
         norm_obs=True,
@@ -205,13 +216,12 @@ def main() -> None:
         gamma=0.99,
     )
 
-    # Separate (un-normalised-reward) eval env so EvalCallback reports raw reward
-    eval_env = DummyVecEnv([make_env(trajectory, seed=args.seed + 100)])
+    eval_env = DummyVecEnv([make_env(trajectory, frame_size, seed=args.seed + 100)])
     eval_env = VecNormalize(
         eval_env,
         norm_obs=True,
-        norm_reward=False,  # keep reward unnormalised for interpretable eval metrics
-        training=False,     # do not update running stats during eval
+        norm_reward=False,
+        training=False,
     )
 
     # ── 3. Build SAC model ────────────────────────────────────────────── #
@@ -260,7 +270,6 @@ def main() -> None:
     vec_norm_path = save_dir / "vecnormalize.pkl"
     train_env.save(str(vec_norm_path))
     print(f"[INFO] VecNormalize stats saved to: {vec_norm_path}")
-
     print("[INFO] Training complete.")
 
 
