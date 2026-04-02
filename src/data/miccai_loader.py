@@ -73,9 +73,10 @@ class MICCAILoader:
         Set to ``0`` to disable.  Default is ``3.0``.
     """
 
-    # Single-view dimensions for the vertically-stacked stereo video
-    STEREO_FULL_H = 1024
-    STEREO_HALF_H = 512
+    # Actual video dimensions: full stereo frame is 1280×2048 (W×H).
+    # info.yaml reports the single-view resolution (1280×1024) — not the full frame.
+    STEREO_FULL_H = 2048   # full video height (both stereo halves stacked)
+    STEREO_HALF_H = 1024   # single-view height (one stereo half)
     STEREO_W = 1280
 
     def __init__(
@@ -179,10 +180,9 @@ class MICCAILoader:
         info = self.load_video_info(sequence_dir)
         res = info.get("resolution", {})
         w = int(res.get("width", self.STEREO_W))
-        h = int(res.get("height", self.STEREO_FULL_H))
-        stack = info.get("video_stack", "vertical")
-        if stack == "vertical":
-            h = h // 2
+        # info.yaml reports the SINGLE-VIEW resolution directly (e.g. 1280×1024).
+        # Do NOT divide by 2 — the yaml already gives the per-camera dimensions.
+        h = int(res.get("height", self.STEREO_HALF_H))
         return w, h
 
     # ------------------------------------------------------------------ #

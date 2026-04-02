@@ -113,10 +113,12 @@ class EndoscopeEnv(gym.Env):
         self._cy_max = self.frame_h - self._half_crop_h
 
         # ── Spaces ──────────────────────────────────────────────────────── #
-        # Observation: normalised (dx, dy) offset of tool tip w.r.t. crop centre
+        # Observation: (dx, dy) offset normalised by half-crop size.
+        # Unbounded so the agent can see the full error magnitude when the tool
+        # is outside the crop window — VecNormalize handles the scale.
         self.observation_space = spaces.Box(
-            low=np.array([-1.0, -1.0], dtype=np.float32),
-            high=np.array([1.0, 1.0], dtype=np.float32),
+            low=np.array([-np.inf, -np.inf], dtype=np.float32),
+            high=np.array([np.inf,  np.inf], dtype=np.float32),
             dtype=np.float32,
         )
 
@@ -224,14 +226,14 @@ class EndoscopeEnv(gym.Env):
         frame_idx = min(self.current_step, self.n_frames - 1)
         tool_tip = self.trajectory[frame_idx]  # (tx, ty)
 
-        # 5. Compute offset and normalise
+        # 5. Compute offset and normalise by half-crop size.
+        # Not clipped — the full magnitude is preserved so the agent knows
+        # how far outside the crop window the tool tip has drifted.
         dx = tool_tip[0] - self.crop_center[0]
         dy = tool_tip[1] - self.crop_center[1]
-        # Normalise so that ±1 corresponds to the crop half-width/height
         obs = np.array(
             [dx / self._half_crop_w, dy / self._half_crop_h], dtype=np.float64
         )
-        obs = np.clip(obs, -1.0, 1.0)
 
         # 6. Compute reward
         dist = float(np.sqrt(dx ** 2 + dy ** 2))
@@ -267,10 +269,9 @@ class EndoscopeEnv(gym.Env):
         tool_tip = self.trajectory[frame_idx]
         dx = tool_tip[0] - self.crop_center[0]
         dy = tool_tip[1] - self.crop_center[1]
-        obs = np.array(
+        return np.array(
             [dx / self._half_crop_w, dy / self._half_crop_h], dtype=np.float64
         )
-        return np.clip(obs, -1.0, 1.0)
 
     def _get_info(
         self,
