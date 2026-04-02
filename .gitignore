@@ -1,0 +1,80 @@
+# =============================================================================
+# Python
+# =============================================================================
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+*.pyd
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+.Python
+pip-wheel-metadata/
+share/python-wheels/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+.env
+
+# =============================================================================
+# Jupyter / IPython
+# =============================================================================
+.ipynb_checkpoints/
+*.ipynb
+
+# =============================================================================
+# Testing & coverage
+# =============================================================================
+.tox/
+.nox/
+.coverage
+.coverage.*
+coverage.xml
+*.cover
+htmlcov/
+.hypothesis/
+.pytest_cache/
+
+# =============================================================================
+# Type checking
+# =============================================================================
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.pytype/
+
+# =============================================================================
+# IDEs & editors
+# =============================================================================
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# =============================================================================
+# Project-specific: model artefacts & data
+# =============================================================================
+# Trained model weights
+models/*.zip
+models/vecnormalize.pkl
+models/eval_logs/
+
+# Raw & processed dataset files (download separately; see README)
+# Anchor to repo root so that src/data/ is NOT ignored
+/data/
+
+# PyTorch checkpoints
+*.pt
+*.pth
+
+# Weights & Biases run artefacts
+wandb/
