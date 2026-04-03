@@ -1,0 +1,131 @@
+<!--
+  Simplified da Vinci ECM (Endoscope Camera Manipulator) MuJoCo model
+  =====================================================================
+
+  Kinematic chain (4 DOF, matching dVRK ECM joint structure):
+
+    world --> ecm_base (fixed ceiling mount)
+           --> outer_yaw_link   [hinge, Z-axis,  +-70 deg]
+           --> outer_pitch_link [hinge, X-axis,  +-30 deg]
+           --> insertion_link   [slide, -Z-axis,  0-24 cm]
+           --> outer_roll_link  [hinge, Z-axis,  +-180 deg]
+           --> camera_body      [fixed, camera site]
+
+  Camera:
+    - Name: endoscope_cam
+    - Mounted at the tip of the insertion tube
+    - Looks in local -Z direction (downward at default pose)
+    - FOV 53.8 deg vertical -- matches MICCAI EndoVis calibration
+      (fy=1035px, height=1024px -> fovy = 2*atan(512/1035) = 53.8 deg)
+
+  Mocap body:
+    - Name: instrument_tip
+    - Kinematically driven by MuJoCoECMEnv each step
+    - Represents the moving surgical instrument tip
+
+  Actuators (velocity control):
+    - ctrl[i] = target joint velocity in physical units
+    - Scaled from [-1, 1] agent actions in the Python environment
+-->
+
+<mujoco model="ecm">
+
+  <option timestep="0.005" integrator="RK4"/>
+
+  <asset>
+    <texture name="grid" type="2d" builtin="checker" width="512" height="512"
+             rgb1="0.1 0.2 0.1" rgb2="0.15 0.25 0.15"/>
+    <material name="grid_mat" texture="grid" texrepeat="4 4" reflectance="0.1"/>
+  </asset>
+
+  <worldbody>
+
+    <light name="overhead" pos="0 0 1" dir="0 0 -1" diffuse="0.9 0.9 0.9" specular="0.1 0.1 0.1"/>
+    <light name="fill"     pos="0.5 0.5 0.5" dir="-1 -1 -1" diffuse="0.4 0.4 0.4"/>
+
+    <!-- Tissue/scene floor plane -->
+    <geom name="floor" type="plane" pos="0 0 -0.8" size="0.6 0.6 0.01"
+          material="grid_mat" contype="0" conaffinity="0"/>
+
+    <!-- ---------------------------------------------------------------- -->
+    <!-- ECM arm: ceiling-mounted, hangs downward                         -->
+    <!-- ---------------------------------------------------------------- -->
+    <body name="ecm_base" pos="0 0 0">
+      <geom name="base_geom" type="cylinder" size="0.04 0.04"
+            rgba="0.35 0.35 0.35 1" mass="2.0"/>
+
+      <!-- Joint 1: outer yaw (rotation around world Z) -->
+      <body name="outer_yaw_link" pos="0 0 0">
+        <joint name="outer_yaw" type="hinge" axis="0 0 1"
+               range="-1.22 1.22" damping="0.5" armature="0.01"/>
+        <geom name="yaw_geom" type="box" size="0.022 0.022 0.04"
+              rgba="0.25 0.38 0.75 1" mass="0.4"/>
+
+        <!-- Joint 2: outer pitch (rotation around local X) -->
+        <body name="outer_pitch_link" pos="0 0 -0.1">
+          <joint name="outer_pitch" type="hinge" axis="1 0 0"
+                 range="-0.52 0.52" damping="0.3" armature="0.01"/>
+          <geom name="pitch_geom" type="cylinder" size="0.016 0.075"
+                euler="90 0 0" rgba="0.25 0.38 0.75 1" mass="0.3"/>
+
+          <!-- Joint 3: insertion translation (prismatic, extends in -Z) -->
+          <body name="insertion_link" pos="0 0 -0.15">
+            <joint name="insertion" type="slide" axis="0 0 -1"
+                   range="0 0.24" damping="0.1" armature="0.001"/>
+            <geom name="insertion_geom" type="cylinder" size="0.009 0.10"
+                  rgba="0.80 0.70 0.10 1" mass="0.15"/>
+
+            <!-- Joint 4: outer roll (rotation around local Z) -->
+            <body name="outer_roll_link" pos="0 0 -0.12">
+              <joint name="outer_roll" type="hinge" axis="0 0 1"
+                     range="-3.14 3.14" damping="0.08" armature="0.001"/>
+              <geom name="roll_geom" type="cylinder" size="0.011 0.009"
+                    rgba="0.25 0.38 0.75 1" mass="0.05"/>
+
+              <!-- Camera body at tip of insertion tube -->
+              <body name="camera_body" pos="0 0 -0.02">
+                <geom name="cam_geom" type="box" size="0.009 0.009 0.011"
+                      rgba="0.08 0.08 0.08 1" mass="0.03"/>
+                <!--
+                  Camera looks in local -Z direction.
+                  At default pose (all joints = 0, insertion = 0.12 m):
+                    Camera world position ~ (0, 0, -0.51)
+                    Camera looks in world -Z direction (downward).
+                  fovy=53.8 matches MICCAI EndoVis calibration
+                  (fy=1035 px, image height=1024 px).
+                -->
+                <camera name="endoscope_cam" pos="0 0 0" euler="0 0 0" fovy="53.8"/>
+              </body>
+
+            </body>
+          </body>
+        </body>
+      </body>
+    </body>
+
+    <!-- ---------------------------------------------------------------- -->
+    <!-- Instrument tip: kinematically driven mocap body                  -->
+    <!-- Moved each RL step via data.mocap_pos[0] in MuJoCoECMEnv        -->
+    <!-- Initial position: 15 cm below default camera position            -->
+    <!-- ---------------------------------------------------------------- -->
+    <body name="instrument_tip" mocap="true" pos="0 0 -0.66">
+      <geom name="tip_geom" type="sphere" size="0.004" rgba="0.95 0.1 0.1 0.9"
+            contype="0" conaffinity="0"/>
+    </body>
+
+  </worldbody>
+
+  <!-- ------------------------------------------------------------------ -->
+  <!-- Velocity actuators                                                   -->
+  <!--   ctrl[i] = target joint velocity in physical units                 -->
+  <!--   kv      = velocity feedback gain (force = kv*(ctrl - qvel))      -->
+  <!--   ctrlrange clips ctrl to physical velocity limits                  -->
+  <!-- ------------------------------------------------------------------ -->
+  <actuator>
+    <velocity name="act_outer_yaw"   joint="outer_yaw"   kv="5" ctrlrange="-0.5  0.5"/>
+    <velocity name="act_outer_pitch" joint="outer_pitch"  kv="5" ctrlrange="-0.3  0.3"/>
+    <velocity name="act_insertion"   joint="insertion"    kv="2" ctrlrange="-0.05 0.05"/>
+    <velocity name="act_outer_roll"  joint="outer_roll"   kv="5" ctrlrange="-1.0  1.0"/>
+  </actuator>
+
+</mujoco>
