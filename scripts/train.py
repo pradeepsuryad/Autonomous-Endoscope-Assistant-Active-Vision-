@@ -333,8 +333,8 @@ def main() -> None:
         learning_rate=args.learning_rate,
         buffer_size=buffer_size,
         batch_size=args.batch_size,
-        ent_coef="auto",
-        gamma=0.99,
+        ent_coef=0.01,      # fixed low value — "auto" kept entropy too high on this 2D task
+        gamma=0.95,         # lower discount suits short 167-frame episodes better than 0.99
         tau=0.005,
         train_freq=1,
         gradient_steps=1,
