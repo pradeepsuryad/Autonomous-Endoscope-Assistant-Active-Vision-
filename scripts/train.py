@@ -191,9 +191,9 @@ def make_state_env(trajectory: np.ndarray, frame_size: tuple, seed: int):
             trajectory=trajectory,
             frame_size=frame_size,
             crop_size=(400, 400),
-            max_velocity=50.0,
-            boundary_penalty=-10.0,
-            velocity_penalty_weight=0.01,
+            max_velocity=150.0,   # raised from 50: mean jump=48px, max jump=159px
+            boundary_penalty=-2.0,
+            velocity_penalty_weight=0.005,
         )
         env.reset(seed=seed)
         return env
@@ -315,9 +315,8 @@ def main() -> None:
         train_env = VecNormalize(
             train_vec,
             norm_obs=True,
-            norm_reward=True,
+            norm_reward=False,  # reward is already O(-1) per step; normalising crushed gradients
             clip_obs=10.0,
-            clip_reward=10.0,
             gamma=GAMMA,
         )
         eval_vec = DummyVecEnv([make_state_env(trajectory, frame_size, args.seed + 100)])

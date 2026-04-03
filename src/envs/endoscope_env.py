@@ -237,7 +237,13 @@ class EndoscopeEnv(gym.Env):
 
         # 6. Compute reward
         dist = float(np.sqrt(dx ** 2 + dy ** 2))
-        reward = -dist  # dense negative distance
+        # Normalise by half-crop so reward is O(-1) per step instead of O(-250).
+        # This prevents VecNormalize from crushing the gradient signal.
+        reward = -(dist / self._half_crop_w)
+        # +0.5 bonus each step the tip is inside the crop window --
+        # gives a clear positive signal as soon as tracking begins to work.
+        if dist < self._half_crop_w:
+            reward += 0.5
         if hit_boundary:
             reward += self.boundary_penalty
         reward -= self.velocity_penalty_weight * float(np.linalg.norm(action))
