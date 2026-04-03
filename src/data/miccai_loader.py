@@ -192,20 +192,18 @@ class MICCAILoader:
     def _extract_trajectory_from_video(self, video_path: Path) -> np.ndarray:
         """Run MOG2 background subtraction to extract instrument centroids.
 
-        Algorithm
-        ---------
-        1. Warm up MOG2 on the first ~30 frames (not recorded).
-        2. For each remaining frame:
-           a. Crop the requested stereo half (top/bottom 512 rows).
-           b. Convert to greyscale and apply the foreground mask.
-           c. Morphologically clean the mask.
-           d. Find the largest contour; record its centroid.
-        3. Forward-fill any frames where no contour was detected.
-        4. Optionally smooth with a Gaussian kernel.
+        Two-pass algorithm
+        ------------------
+        Pass 1 (warm-up only): seek to frame 0, read WARMUP frames to build
+        the background model, then seek back to frame 0.
+        Pass 2 (extraction): read every frame from 0 to total_frames-1 and
+        record one centroid per frame.  This guarantees
+        ``len(trajectory) == CAP_PROP_FRAME_COUNT`` and that
+        ``trajectory[i]`` corresponds exactly to video frame *i*.
 
         Returns
         -------
-        np.ndarray, shape (N, 2)
+        np.ndarray, shape (N, 2)  where N == CAP_PROP_FRAME_COUNT
         """
         cap = cv2.VideoCapture(str(video_path))
         if not cap.isOpened():
@@ -214,7 +212,7 @@ class MICCAILoader:
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         logger.info("Video: %d frames total", total_frames)
 
-        # MOG2 background subtractor — history tuned for surgical video
+        # MOG2 background subtractor
         fgbg = cv2.createBackgroundSubtractorMOG2(
             history=50,
             varThreshold=25,
@@ -224,35 +222,33 @@ class MICCAILoader:
         # Morphological kernel for noise removal
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
 
-        # Warm-up: feed ~30 frames to the background model without recording
+        # Pass 1 — warm up MOG2 on first WARMUP frames, then rewind
         WARMUP = min(30, total_frames // 4)
         for _ in range(WARMUP):
             ret, frame = cap.read()
             if not ret:
                 break
             half = self._crop_stereo_half(frame)
-            grey = cv2.cvtColor(half, cv2.COLOR_BGR2GRAY)
-            fgbg.apply(grey)
+            fgbg.apply(cv2.cvtColor(half, cv2.COLOR_BGR2GRAY))
 
-        # Main extraction pass
+        # Rewind to frame 0 for the extraction pass
+        cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+
+        # Pass 2 — one centroid per original frame
         coords: list[Optional[Tuple[float, float]]] = []
 
-        while True:
+        for _ in range(total_frames):
             ret, frame = cap.read()
             if not ret:
-                break
+                coords.append(None)
+                continue
 
             half = self._crop_stereo_half(frame)
             grey = cv2.cvtColor(half, cv2.COLOR_BGR2GRAY)
-
-            # Apply background subtraction
             fg_mask = fgbg.apply(grey)
-
-            # Morphological clean-up
             fg_mask = cv2.morphologyEx(fg_mask, cv2.MORPH_OPEN, kernel)
             fg_mask = cv2.morphologyEx(fg_mask, cv2.MORPH_DILATE, kernel)
 
-            # Find contours and pick the largest
             contours, _ = cv2.findContours(
                 fg_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
             )
@@ -263,18 +259,21 @@ class MICCAILoader:
                 if cv2.contourArea(largest) >= self.min_contour_area:
                     M = cv2.moments(largest)
                     if M["m00"] > 0:
-                        cx = M["m10"] / M["m00"]
-                        cy = M["m01"] / M["m00"]
-                        centroid = (cx, cy)
+                        centroid = (M["m10"] / M["m00"], M["m01"] / M["m00"])
 
             coords.append(centroid)
 
         cap.release()
-        logger.info("Extracted %d frames (%d with valid detections)",
-                    len(coords), sum(1 for c in coords if c is not None))
+        valid = sum(1 for c in coords if c is not None)
+        logger.info("Extracted %d frames (%d with valid detections)", len(coords), valid)
 
         if not coords:
             raise RuntimeError(f"No frames could be read from {video_path}")
+
+        # Guarantee alignment: one entry per original frame
+        assert len(coords) == total_frames, (
+            f"Frame-count mismatch: got {len(coords)} coords for {total_frames} frames"
+        )
 
         # Forward-fill missing detections
         traj = self._fill_missing(coords)

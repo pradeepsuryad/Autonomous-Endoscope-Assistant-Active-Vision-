@@ -1,11 +1,11 @@
 """
-Training Script — Autonomous Endoscope Assistant (Active Vision)
+Training Script -- Autonomous Endoscope Assistant (Active Vision)
 ================================================================
 
 Train a Soft Actor-Critic (SAC) agent on one of two environment modes:
 
-  MLP mode (default)  — state = normalised (dx, dy) offset, MlpPolicy
-  Visual mode         — state = 84×84 RGB crop from real video, CnnPolicy
+  MLP mode (default)  -- state = normalised (dx, dy) offset, MlpPolicy
+  Visual mode         -- state = 84x84 RGB crop from real video, CnnPolicy
 
 Quick start (no real data)
 --------------------------
@@ -14,22 +14,22 @@ Quick start (no real data)
 
 With real MICCAI EndoVis data
 -----------------------------
-    python scripts/train.py \\
+    python scripts/train.py \
         --case_dir "C:/Users/dprad/Downloads/train/train/case_1/1"
 
-    python scripts/train.py --visual \\
+    python scripts/train.py --visual \
         --case_dir "C:/Users/dprad/Downloads/train/train/case_1/1"
 
-    # Multiple sequences (MLP mode only — concatenates trajectories)
-    python scripts/train.py \\
-        --case_dir ".../case_1/1" ".../case_1/2" ".../case_2/1"
+    # Multiple sequences (MLP mode only)
+    python scripts/train.py \
+        --case_dir ".../case_1/1" ".../case_1/2" ".../case_2/1" \
+        --total_timesteps 1000000
 """
 
 from __future__ import annotations
 
 import argparse
 import math
-import os
 import sys
 from pathlib import Path
 from typing import Optional
@@ -37,7 +37,6 @@ from typing import Optional
 import numpy as np
 import tqdm as tqdm_lib
 
-# Allow running from the repo root without installing the package
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
@@ -58,17 +57,7 @@ from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 class TrainingProgressCallback(BaseCallback):
     """Live tqdm progress bar with ETA, mean distance, and mean reward.
 
-    Displays a single bar like::
-
-        SAC Training: 42%|████████        | 210k/500k [03:21<04:35, 1043 step/s]
-                      dist=87px  rew=-91.3
-
-    Parameters
-    ----------
-    total_timesteps : int
-        Total training steps (used to size the bar).
-    log_interval : int
-        How often (in steps) to refresh the postfix metrics.
+    Uses only ASCII characters to avoid encoding errors on Windows consoles.
     """
 
     def __init__(self, total_timesteps: int, log_interval: int = 500) -> None:
@@ -86,6 +75,7 @@ class TrainingProgressCallback(BaseCallback):
             unit="step",
             unit_scale=True,
             ncols=110,
+            ascii=True,   # ASCII-only bar: avoids Windows cp1252/utf-8 glyphs
             bar_format=(
                 "{desc}: {percentage:3.0f}%|{bar}| {n_fmt}/{total_fmt} "
                 "[{elapsed}<{remaining}, {rate_fmt}] {postfix}"
@@ -96,18 +86,15 @@ class TrainingProgressCallback(BaseCallback):
     def _on_step(self) -> bool:
         self._pbar.update(1)
 
-        # Collect distance from info dicts (one per parallel env)
         for info in self.locals.get("infos", []):
             if "distance" in info:
                 self._distances.append(float(info["distance"]))
 
-        # Collect raw rewards
         rewards = self.locals.get("rewards")
         if rewards is not None:
             vals = rewards.tolist() if hasattr(rewards, "tolist") else [float(rewards)]
             self._rewards.extend(vals)
 
-        # Refresh postfix every log_interval steps
         if self.num_timesteps % self.log_interval == 0:
             win = self.log_interval
             postfix: dict = {}
@@ -122,7 +109,6 @@ class TrainingProgressCallback(BaseCallback):
 
     def _on_training_end(self) -> None:
         if self._pbar is not None:
-            # Final metrics summary
             if self._distances:
                 print(
                     f"\n[SUMMARY] Mean distance (last 1k steps): "
@@ -139,7 +125,7 @@ class TrainingProgressCallback(BaseCallback):
 def make_synthetic_trajectory(
     n_frames: int = 1000,
     frame_w: int = 1280,
-    frame_h: int = 512,
+    frame_h: int = 1024,
 ) -> np.ndarray:
     """Lissajous figure-8 path for smoke-testing without real data."""
     t = np.linspace(0, 4 * math.pi, n_frames)
@@ -165,7 +151,7 @@ def parse_args() -> argparse.Namespace:
         metavar="DIR",
         help=(
             "One or more MICCAI sequence directories each containing video.mp4. "
-            "In --visual mode only the first directory is used. "
+            "In --visual mode exactly one directory is accepted. "
             "Omit to run on a synthetic trajectory."
         ),
     )
@@ -173,9 +159,8 @@ def parse_args() -> argparse.Namespace:
         "--visual",
         action="store_true",
         help=(
-            "Use EndoscopeVisualEnv (84×84 image observations, CnnPolicy). "
-            "Requires --case_dir pointing to a real video. "
-            "Default: EndoscopeEnv (2D state, MlpPolicy)."
+            "Use EndoscopeVisualEnv (84x84 image observations, CnnPolicy). "
+            "Requires exactly one --case_dir pointing to a real video."
         ),
     )
     parser.add_argument(
@@ -185,19 +170,10 @@ def parse_args() -> argparse.Namespace:
         choices=["top", "bottom"],
         help="Which stereo camera half to use.",
     )
-    parser.add_argument(
-        "--total_timesteps",
-        type=int,
-        default=500_000,
-        help="Total SAC training steps.",
-    )
-    parser.add_argument(
-        "--save_dir",
-        type=str,
-        default="models/",
-    )
-    parser.add_argument("--eval_freq",    type=int,   default=5_000)
-    parser.add_argument("--n_eval_episodes", type=int, default=5)
+    parser.add_argument("--total_timesteps", type=int,   default=500_000)
+    parser.add_argument("--save_dir",        type=str,   default="models/")
+    parser.add_argument("--eval_freq",       type=int,   default=5_000)
+    parser.add_argument("--n_eval_episodes", type=int,   default=5)
     parser.add_argument("--learning_rate",   type=float, default=3e-4)
     parser.add_argument("--buffer_size",     type=int,   default=100_000)
     parser.add_argument("--batch_size",      type=int,   default=256)
@@ -225,13 +201,17 @@ def make_state_env(trajectory: np.ndarray, frame_size: tuple, seed: int):
 
 
 def make_visual_env(
-    video_path: str, trajectory: np.ndarray, frame_size: tuple, seed: int
+    video_path: str,
+    trajectory: np.ndarray,
+    frame_size: tuple,
+    stereo_half: str,
+    seed: int,
 ):
     def _init():
         env = EndoscopeVisualEnv(
             video_path=video_path,
             trajectory=trajectory,
-            stereo_half="top",
+            stereo_half=stereo_half,      # propagated from --stereo_half
             frame_size=frame_size,
             crop_size=(400, 400),
             obs_size=84,
@@ -250,6 +230,16 @@ def make_visual_env(
 
 def main() -> None:
     args = parse_args()
+
+    # Reject multi-sequence visual mode up-front with a clear error
+    if args.visual and args.case_dir is not None and len(args.case_dir) > 1:
+        print(
+            "[ERROR] --visual mode requires exactly one --case_dir "
+            "(one video stream per episode). "
+            "Received: " + str(args.case_dir)
+        )
+        sys.exit(1)
+
     save_dir = Path(args.save_dir)
     save_dir.mkdir(parents=True, exist_ok=True)
 
@@ -267,63 +257,84 @@ def main() -> None:
                 print(f"[ERROR] case_dir '{p}' is not a directory.")
                 sys.exit(1)
             frame_size = loader.get_frame_size(p)
-            print(f"[INFO] Loading: {p}  (single-view {frame_size[0]}×{frame_size[1]})")
+            print(f"[INFO] Loading: {p}  (single-view {frame_size[0]}x{frame_size[1]})")
             traj = loader.load_trajectory(p)
             trajectories.append(traj)
-            print(f"[INFO]   → {len(traj)} frames")
+            print(f"[INFO]   -> {len(traj)} frames")
             if i == 0:
                 video_path = str(p / "video.mp4")
 
         trajectory = np.concatenate(trajectories, axis=0)
         print(f"[INFO] Total trajectory: {len(trajectory)} frames")
-
-        if args.visual and len(args.case_dir) > 1:
-            print(
-                "[WARN] --visual mode uses a single video stream. "
-                "Only the first case_dir will be used for the video."
-            )
     else:
-        mode_str = "visual (synthetic frames)" if args.visual else "state"
+        mode_str = "visual" if args.visual else "state"
         print(
             f"[INFO] No --case_dir provided. Using synthetic trajectory "
-            f"({frame_size[0]}×{frame_size[1]}, 1000 frames) in {mode_str} mode."
+            f"({frame_size[0]}x{frame_size[1]}, 1000 frames) in {mode_str} mode."
         )
         trajectory = make_synthetic_trajectory(
             n_frames=1_000, frame_w=frame_size[0], frame_h=frame_size[1]
         )
         if args.visual:
-            print("[WARN] --visual requires a real video.mp4 — falling back to MLP mode.")
+            print("[WARN] --visual requires a real video.mp4 -- falling back to MLP mode.")
             args.visual = False
 
     print(f"[INFO] Mode       : {'Visual (CnnPolicy)' if args.visual else 'State (MlpPolicy)'}")
-    print(f"[INFO] Frame size : {frame_size}")
+    print(f"[INFO] Frame size : {frame_size[0]}x{frame_size[1]}")
     print(f"[INFO] Trajectory : {trajectory.shape}")
+
+    GAMMA = 0.95
 
     # ── 2. Build vectorised envs ───────────────────────────────────────── #
     if args.visual:
         policy = "CnnPolicy"
-        train_vec = DummyVecEnv([make_visual_env(video_path, trajectory, frame_size, args.seed)])
-        # Don't normalise image pixels — NatureCNN divides by 255 internally
+        train_vec = DummyVecEnv([
+            make_visual_env(video_path, trajectory, frame_size, args.stereo_half, args.seed)
+        ])
+        # NatureCNN divides pixels by 255 internally -- do not normalise obs
         train_env = VecNormalize(
-            train_vec, norm_obs=False, norm_reward=True, clip_reward=10.0, gamma=0.99
+            train_vec,
+            norm_obs=False,
+            norm_reward=True,
+            clip_reward=10.0,
+            gamma=GAMMA,
         )
-        eval_vec = DummyVecEnv([make_visual_env(video_path, trajectory, frame_size, args.seed + 100)])
+        eval_vec = DummyVecEnv([
+            make_visual_env(video_path, trajectory, frame_size, args.stereo_half, args.seed + 100)
+        ])
         eval_env = VecNormalize(
-            eval_vec, norm_obs=False, norm_reward=False, training=False
+            eval_vec,
+            norm_obs=False,
+            norm_reward=False,
+            training=False,
+            gamma=GAMMA,
         )
     else:
         policy = "MlpPolicy"
         train_vec = DummyVecEnv([make_state_env(trajectory, frame_size, args.seed)])
         train_env = VecNormalize(
-            train_vec, norm_obs=True, norm_reward=True, clip_obs=10.0, clip_reward=10.0, gamma=0.99
+            train_vec,
+            norm_obs=True,
+            norm_reward=True,
+            clip_obs=10.0,
+            clip_reward=10.0,
+            gamma=GAMMA,
         )
         eval_vec = DummyVecEnv([make_state_env(trajectory, frame_size, args.seed + 100)])
         eval_env = VecNormalize(
-            eval_vec, norm_obs=True, norm_reward=False, training=False
+            eval_vec,
+            norm_obs=True,
+            norm_reward=False,
+            training=False,
+            gamma=GAMMA,
         )
 
+    # Sync eval normalisation stats from train env so eval sees the same
+    # observation scaling that the policy was trained with
+    eval_env.obs_rms = train_env.obs_rms
+    eval_env.ret_rms = train_env.ret_rms
+
     # ── 3. SAC model ──────────────────────────────────────────────────── #
-    # Visual mode needs more warm-up and a larger buffer for image replay
     learning_starts = 5_000 if args.visual else 1_000
     buffer_size = min(args.buffer_size, 50_000) if args.visual else args.buffer_size
 
@@ -333,13 +344,13 @@ def main() -> None:
         learning_rate=args.learning_rate,
         buffer_size=buffer_size,
         batch_size=args.batch_size,
-        ent_coef=0.01,      # fixed low value — "auto" kept entropy too high on this 2D task
-        gamma=0.95,         # lower discount suits short 167-frame episodes better than 0.99
+        ent_coef=0.01,
+        gamma=GAMMA,          # consistent with VecNormalize gamma
         tau=0.005,
         train_freq=1,
         gradient_steps=1,
         learning_starts=learning_starts,
-        verbose=0,          # suppressed — tqdm callback handles progress output
+        verbose=0,
         seed=args.seed,
         device="auto",
     )
@@ -366,18 +377,18 @@ def main() -> None:
     model.learn(
         total_timesteps=args.total_timesteps,
         callback=callbacks,
-        progress_bar=False,   # we use our own tqdm bar above
+        progress_bar=False,
     )
 
     # ── 6. Save ────────────────────────────────────────────────────────── #
     suffix = "visual" if args.visual else "state"
     final_path = save_dir / f"sac_endoscope_{suffix}_final"
     model.save(str(final_path))
-    print(f"[INFO] Model saved     → {final_path}.zip")
+    print(f"[INFO] Model saved      -> {final_path}.zip")
 
     vec_norm_path = save_dir / f"vecnormalize_{suffix}.pkl"
     train_env.save(str(vec_norm_path))
-    print(f"[INFO] VecNormalize    → {vec_norm_path}")
+    print(f"[INFO] VecNormalize     -> {vec_norm_path}")
     print("[INFO] Done.")
 
 
